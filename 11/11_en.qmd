@@ -1,0 +1,406 @@
+---
+title: 'Modularity and a Tour of Character Networks'
+jupyter: python3
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    number-sections: true
+---
+
+In the last tutorial we built the Girvan-Newman algorithm by hand and used a density-based partition score to pick a "best" split of the karate club. The score had a weakness: it preferred very fine partitions with many small dense clusters. The **modularity** was a hinted improvement.
+
+In this practical we pick up where we left off. We work with character co-occurrence networks from books and films and use them for:
+
+1. revisiting concepts from earlier practicals (centralities, degree distributions, small-world structure, cliques) on more fun networks,
+2. introducing modularity and the Louvain algorithm and using them to find communities.
+
+You will see the same techniques applied with bit less hand-holding than before. If you get stuck on something we did already, the relevant earlier notebook is your friend.
+
+## Datasets
+
+Download the dataset archive from [this link](https://filr.cs.cas.cz/filr/public-link/file-download/2c9681489df68201019e15b758e94b31/822/-5863700863071829880/data.zip) and extract it so that the GraphML files end up in a `data/` subdirectory next to this notebook.
+
+Several character interaction networks are available in the `data/` directory; pick whichever you like the most and load it in the cell below. Each file is a GraphML graph with characters as nodes and an integer `weight` attribute on edges counting their co-appearances.
+
+- **A Song of Ice and Fire / Game of Thrones** -- five per-book networks: `got_book1.graphml`, ..., `got_book5.graphml`. Source: [mmmarchetti/game-of-thrones-dataset](https://www.kaggle.com/datasets/mmmarchetti/game-of-thrones-dataset)
+- **Star Wars** -- six per-film networks: `starwars_ep1.graphml`, ..., `starwars_ep6.graphml`, plus an aggregate `starwars_full.graphml`. Source: [evelinag/StarWars-social-network](https://github.com/evelinag/StarWars-social-network)
+- **Marvel** -- comic co-appearance network of the main heroes: `marvel.graphml` (around 330 characters, very dense). Source: [csanhueza/the-marvel-universe-social-network](https://www.kaggle.com/datasets/csanhueza/the-marvel-universe-social-network)
+- **Harry Potter** -- seven per-book networks: `hp_book1.graphml`, ..., `hp_book7.graphml`. Source: [efekarakus/potter-network](https://github.com/efekarakus/potter-network)
+- **Les Misérables** -- classical character co-appearance graph: `les_mis.graphml`. A good choice if you would rather avoid pop culture. Source: [knuth/sgb](https://www-cs-faculty.stanford.edu/~knuth/sgb.html)
+
+```{python}
+import math
+from collections import Counter
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import networkx as nx
+import matplotlib.pyplot as plt
+
+import warnings
+warnings.filterwarnings("ignore")
+```
+
+
+# Hypotheses for the whole notebook
+
+We pose the following questions. Keep them in mind as you work through the sections:
+
+> **H1 (scale-free).** Does the chosen character network have a heavy-tailed degree distribution?
+>
+> **H2 (small world).** Is the diameter small relative to the network size, and is the clustering substantially higher than in a random graph with the same density?
+>
+> **H3 (centrality and narrative).** Which characters get the top centrality scores, and do different centrality measures agree? Do the rankings match your intuition about the source material?
+>
+> **H4 (community structure).** Does the network have a modular community structure, and what do the recovered communities correspond to in the story (Houses, factions, story arcs, locations, ...)?
+>
+> **H5 (evolution).** If your dataset is split by episode/book, how do the centralities and communities change across the timeline?
+
+
+# Loading the data
+
+If your `data/` folder is not yet populated, the cell below will at least create `data/les_mis.graphml` from the NetworkX built-in so you have something to play with.
+
+```{python}
+DATA_DIR = Path("data")
+DATA_DIR.mkdir(exist_ok=True)
+
+if not (DATA_DIR / "les_mis.graphml").exists():
+    G_tmp = nx.les_miserables_graph()
+    for u, v, d in G_tmp.edges(data=True):
+        d["weight"] = int(d.get("weight", 1))
+    nx.write_graphml(G_tmp, DATA_DIR / "les_mis.graphml")
+```
+
+Pick one file and load it. Change the file name to try a different network.
+
+```{python}
+# Pick one of the available datasets
+G = nx.read_graphml("data/got_book1.graphml")
+
+print(G)
+```
+
+## First look
+
+Before any modeling, get a feel for what is in the network.
+
+> **Task 1**. Print the five nodes with the highest (unweighted) degree and the five edges with the largest weights. Comment briefly: do the high-degree nodes match your intuition about which characters are most central in this story?
+
+```{python}
+# TODO:
+#   1. top-5 nodes by degree
+#   2. top-5 edges by weight (G.edges(data='weight') gives (u, v, w) tuples)
+```
+
+
+# Visualization
+
+## Static layouts
+
+```{python}
+seed = 42
+
+fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+for ax, layout_name, layout_fn in zip(
+    axes,
+    ["spring", "kamada_kawai", "circular"],
+    [lambda G: nx.spring_layout(G, seed=seed),
+     lambda G: nx.kamada_kawai_layout(G),
+     lambda G: nx.circular_layout(G)],
+):
+    pos = layout_fn(G)
+    nx.draw(G, pos=pos, node_size=30, edge_color="lightgray",
+            width=0.5, with_labels=False, ax=ax)
+    ax.set_title(layout_name)
+plt.tight_layout()
+plt.show()
+```
+
+The layout that is most legible depends on the graph. For most character networks, `spring_layout` and `kamada_kawai` separate clusters reasonably well; `circular` rarely helps but is sometimes useful for small graphs.
+
+You can reuse one consistent layout for the rest of the static plots to ensure consistency.
+
+```{python}
+pos = nx.kamada_kawai_layout(G, weight="weight")
+```
+
+## Encoding structure
+
+> **Task 2**. Draw `G` with node size proportional to degree. Label only the top-10 highest-degree nodes to avoid clutter. Use the `pos` layout from above.
+
+```{python}
+# TODO:
+#   1. compute degrees and a node_size array
+#   2. labels = top-10 highest-degree nodes
+#   3. draw with nx.draw_networkx_nodes / edges / labels
+```
+
+
+## Interactive viz with ipysigma
+
+For larger networks, static plots become hard to read. The `ipysigma` widget renders an interactive layout where you can pan, zoom, and hover over individual nodes.
+
+```{python}
+from ipysigma import Sigma
+
+G_view = G.copy()
+for n in G_view.nodes:
+    G_view.nodes[n]["degree"] = G_view.degree(n)
+    G_view.nodes[n]["name"] = str(n)
+Sigma(
+    G_view,
+    node_size="degree",
+    node_size_range=(3, 25),
+    node_label="name",
+    edge_size="weight",
+)
+```
+
+Explore different layout options and styling parameters in the [ipysigma documentation](https://github.com/medialab/ipysigma). 
+
+# A centrality tour
+
+> *Reminder.* For a vertex $v$ in a graph with $n$ vertices and adjacency matrix $A$:
+>
+> - **degree** $C_D(v) = \deg(v) / (n-1)$,
+> - **betweenness** $C_B(v) = \sum_{s \neq v \neq t} \sigma_{st}(v) / \sigma_{st}$,
+> - **eigenvector** $C_E(v)$ is the $v$-th coordinate of the leading eigenvector of $A$,
+
+> **Task 3**. Compute degree centrality, betweenness centrality, eigenvector centrality, and PageRank for `G`. Print the top-10 by each measure.
+
+```{python}
+# TODO:
+#   1. compute the four centrality dictionaries
+#   3. print the top-10 by each measure
+centrality = None
+```
+
+## Comparing centralities
+
+> **Task 4**. Make a single figure with three scatter plots: betweenness vs degree, eigenvector vs degree, PageRank vs degree (one centrality per panel). Label the five most extreme outliers in each panel by name. Then compute the Spearman rank correlation matrix between the four measures and print it (if you know what that means, otherwise don't worry about it).
+
+```{python}
+# TODO:
+#   1. 1x3 subplots, scatter the three pairs
+#   2. label the five most extreme points (e.g. nodes whose rank in y differs
+#      most from their rank in x)
+#   3. correlation matrix (if you know what that is)
+```
+
+In most character networks the four measures are highly correlated. Degree, eigenvector, and PageRank tend to track each other closely (the leading eigenvector picks up degree-like patterns when degrees are heterogeneous). Betweenness is the one that disagrees most: it elevates "bridge" characters who connect parts of the network even if they do not personally appear in many scenes.
+
+
+# Macroscopic properties
+
+We now check H1 and H2 from the hypotheses section.
+
+## Degree distribution
+
+> **Task 5**. Plot the empirical degree distribution two ways:
+>
+> 1. as a histogram on linear axes (raw degree counts on x, frequency on y),
+> 2. as a cumulative distribution $P(K \geq k)$ on log-log axes.
+>
+> Then estimate the slope of the log-log CCDF (only over the bulk, ignoring the very low and very high degrees) and report it (if you know what that means, otherwise don't worry about it).
+
+```{python}
+# TODO:
+#   1. degrees array
+#   2. histogram (linear)
+#   3. CCDF on log-log
+#   4. fit a line to log10(k) vs log10(P(K>=k)) over a sensible window (if you know how to do that and what it means)
+slope = None
+```
+
+## Small-world check
+
+> **Task 6**. Restrict to the largest connected component of `G` (call it `G0`) and compute:
+>
+> 1. average shortest path length $\bar{\ell}(G_0)$,
+> 2. average clustering coefficient $\bar C(G_0)$,
+> 3. the same two numbers for an Erdős-Rényi graph with the same number of nodes and edges.
+>
+> Report all four numbers. The small-world fingerprint is $\bar\ell$ similar to ER, $\bar C$ much larger.
+
+```{python}
+# TODO:
+#   1. extract the LCC as a Graph (not a SubGraph view); copy it
+#   2. compute average shortest path length and average clustering on G0
+#   3. sample an ER graph with matching n, m and compute the same two
+ell, C, ell_er, C_er = None, None, None, None
+```
+
+
+# Cliques
+
+The lecture introduced several "local definition" notions of community such as cliques, $k$-cliques, $k$-clubs, and $k$-plexes. Cliques are the strictest version: a set of nodes that are all mutually connected. We take a look at how big they get in the network.
+
+> **Task 7**. Find all maximal cliques of size at least 4 in the LCC. Report the size of the largest clique, how many maximal cliques of that size exist, and one example.
+
+```{python}
+# TODO:
+#   1. nx.find_cliques(G0) is a generator over maximal cliques
+#   2. filter to cliques of size >= 4
+#   3. report largest size, count, an example
+```
+
+
+# Communities and modularity
+
+## What was wrong with the density score
+
+In the previous practical we used $\bar\rho_{\text{int}}(P) - \bar\rho_{\text{ext}}(P)$ to pick the best partition produced by Girvan-Newman on the karate club. The chosen partition had many small cliques and many singletons, far finer than the ground truth. The score was biased toward fine splits.
+
+The standard fix is to compare the partition not to "all pairs" but to a **null model**: a randomized version of the graph that preserves something about its structure (for community detection, the degree sequence). A partition is "good" if it has many more edges within clusters than the null model would expect.
+
+## Modularity
+
+> **Definition (Modularity).** Given a partition $P = \{C_1, \dots, C_r\}$ of $G$ into $r$ clusters,
+> $$
+> Q(P) = \sum_{c=1}^{r}\!\left[\frac{m_c}{m} - \left(\frac{d_c}{2m}\right)^{\!2}\right],
+> $$
+> where $m$ is the total number of edges, $m_c$ is the number of edges with both endpoints in cluster $C_c$, and $d_c = \sum_{v \in C_c} \deg(v)$ is the total degree of $C_c$.
+
+The first term $m_c / m$ is the empirical fraction of edges inside cluster $c$. The second term $(d_c / 2m)^2$ is the *expected* fraction under the **configuration model** (a random graph that preserves the degree sequence): if you cut every edge into two half-edges and reconnect them at random, the probability that a half-edge attached to $C_c$ reconnects to another half-edge attached to $C_c$ is $d_c / 2m$, and there are two endpoints to match. Putting it all together you get $(d_c / 2m)^2$ in expectation.
+
+The lecture also gives the equivalent matrix form
+$$
+Q = \frac{1}{2m}\sum_{ij}\!\left(A_{ij} - \frac{k_i k_j}{2m}\right)\!\delta(C_i, C_j),
+$$
+where $\delta(C_i, C_j)$ is $1$ if $i, j$ are in the same cluster and $0$ otherwise. The matrix $B = A - kk^\top / 2m$ inside the sum is the **modularity matrix**, whose leading eigenvector gives a spectral relaxation of modularity maximization.
+
+## Modularity by hand on a toy graph
+
+Let us reuse the two-4-cycle graph with one bridge from the previous practical and compute $Q$ for the obvious 2-cluster partition.
+
+```{python}
+G_toy = nx.Graph()
+nx.add_cycle(G_toy, [0, 1, 2, 3])
+nx.add_cycle(G_toy, [4, 5, 6, 7])
+G_toy.add_edge(0, 7)
+
+partition_toy = [{0, 1, 2, 3}, {4, 5, 6, 7}]
+```
+
+> **Task 8**. Compute $Q$ for `partition_toy` on `G_toy` from the formula above, by hand (in code, but using the formula directly). Verify against `nx.community.modularity`. What is $Q$ for the singleton partition? What is $Q$ for the trivial one-cluster partition?
+
+```{python}
+# TODO:
+#   1. m, m_c, d_c, then plug into the formula
+#   2. compare with nx.community.modularity(G_toy, partition_toy)
+#   3. evaluate Q for the singletons partition and for [V] (one cluster)
+def modularity_by_hand(G, partition):
+    # ...
+    pass
+```
+
+Two facts to absorb from this output:
+
+1. The one-cluster partition has $Q = 0$ exactly. Plugging $C = V$ into the formula gives $m/m - (2m/2m)^2 = 0$.
+2. The singletons partition has $Q < 0$. With every node in its own cluster, $m_c = 0$ for every $c$, so the first term vanishes and only the (negative) penalty from the null model survives.
+
+Both extremes are not optimal. The "good" partitions sit between them, and modularity has its maximum somewhere in the middle.
+
+
+## The Louvain algorithm
+
+Modularity maximization over all partitions is NP-hard. The **Louvain method** (Blondel, Guillaume, Lambiotte, Lefebvre, 2008) is a fast greedy heuristic that finds high-modularity partitions in practice, even on graphs with millions of edges. It works in two alternating phases:
+
+> **Pseudocode (Louvain).**
+>
+> ```
+> input: graph G
+> initialize: every node in its own community
+>
+> repeat:
+>     phase 1 (local moving):
+>         repeat:
+>             for each node v in some order:
+>                 for each community C of a neighbor of v:
+>                     compute Delta_Q if v moved into C
+>                 move v into the community with the largest positive Delta_Q
+>                 (if all moves give Delta_Q <= 0, leave v in place)
+>         until no node moved in a full pass
+>
+>     phase 2 (aggregation):
+>         build a new graph G' whose nodes are the communities of G
+>         edge weight (C, C') = sum of edge weights between C and C' in G
+>         self-loop on C  = 2 * (sum of weights inside C)
+>         G <- G'
+>
+> until phase 1 produces no moves on the aggregated graph
+> ```
+
+Two things make this efficient: each local move only considers neighbor communities (not all communities), and after aggregation the graph shrinks rapidly. The output is a hierarchy: at each level of aggregation you get a coarser partition.
+
+We use NetworkX's implementation directly.
+
+> **Task 9**. Run `nx.community.louvain_communities` on `G0` (the LCC) using the edge `weight` attribute. Report the number of communities, the resulting modularity, and the community sizes.
+
+```{python}
+# TODO:
+communities = None
+Q_louvain = None
+```
+
+Modularity above $0.4$ for a character network is good; above $0.5$ is very good. The number of communities is often comparable to the number of named factions or story arcs in the source material.
+
+
+## Visualizing communities
+
+The default `spring_layout` does not "know" about the partition we just found, so when we color nodes by community the inter-cluster edges still cut across the figure and obscure the structure. A simple trick fixes this: make the springs between nodes in the *same* community much stronger than the springs between communities. The layout algorithm then pulls each community into a tight cluster while letting the clusters drift apart.
+
+- **`layout_weight = 10.0` vs `0.1`.** `spring_layout` is a physical analogy: connected nodes are pulled toward each other, with the strength controlled by the edge weight. Setting intra-community edges 100x heavier than inter-community ones tightens each community and lets the groups separate.
+- **The `k` parameter.** In `nx.spring_layout`, `k` is the optimal distance between connected nodes. Raising it spreads the figure out; lowering it tightens it.
+
+> **Task 10**. Build a copy of `G0` whose edges have an extra `layout_weight` attribute equal to `10.0` for intra-community edges and `0.1` for inter-community edges. Compute a fresh layout `pos_comm` using `nx.spring_layout(..., weight='layout_weight', k=..., seed=seed)`. Plot `G0` twice in a 1x2 figure: left with the original `pos`, right with the new `pos_comm`, both colored by Louvain community.
+
+```{python}
+# TODO:
+```
+
+
+## Comparing methods
+
+NetworkX provides several other community detection methods. 
+
+> **Task 11**. Run the following methods on `G0` and report `(num_communities, Q)` for each:
+>
+> - `nx.community.louvain_communities` (already done),
+> - `nx.community.greedy_modularity_communities`,
+> - `nx.community.label_propagation_communities`,
+> - the Girvan-Newman result you produced last week (use `nx.community.girvan_newman` and pick the partition that maximizes $Q$ along its sequence).
+
+```{python}
+# TODO:
+#   for each method, build a list-of-sets partition,
+#   then evaluate Q with nx.community.modularity, and store both numbers.
+results = {}
+```
+
+
+# Evolution across episodes
+
+This section only applies if your dataset is split by episode. 
+
+> **Task 12**. Load the per-episode networks for your chosen universe (e.g. `got_book1.graphml` through `got_book5.graphml`) and for each episode compute:
+>
+> 1. the number of nodes,
+> 2. the number of edges,
+> 3. average clustering of the LCC,
+> 4. modularity of the Louvain partition,
+> 5. the top-3 nodes by PageRank.
+>
+> Plot the first four quantities as line charts over episodes. Discuss: which characters rise and fall in the rankings, and does any structural quantity change abruptly between episodes?
+
+```{python}
+# TODO:
+#   1. assemble a list of file paths for your chosen universe
+#   2. for each: load, compute the five quantities, store
+#   3. plot evolution of the structural quantities
+EVOLUTION = False
+```
+

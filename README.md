@@ -41,8 +41,8 @@ tutorial, by which you can gain 5 points.
 | 10 | 20.4.2026 | **Test** + theoretical | **2T** | graph properties, threshold |
 | 11 | 27.4.2026 | theoretical tutorial | | probabilistic methods in random graphs |
 | 12 | 4.5.2026 | practical tutorial | **5P** | community detection |
-| 13 | 11.5.2026 | theoretical tutorial | |  |
-| 14 | 18.5.2026 | **Test** + practical | **3T + 6P** | |
+| 13 | 11.5.2026 | ~~theoretical~~ practical tutorial | **6P** | modularity, Louvain algorithm, community detection |
+| 14 | 18.5.2026 | ~~**Test**~~ + practical | ~~**3T**~~ + **7P** | If you are still short on points and need the credit, contact me. |
 
 ## Environment Setup
 
